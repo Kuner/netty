@@ -41,10 +41,11 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap impleme
     private final String name;
     private boolean removed;
     // This does not need to be volatile as we always check and set this flag from EventExecutor thread. This means
-    // that at worse we will submit a task for channelReadComplete() that may do nothing if channelReadCompletePending
+    // that at worse we will submit a task for channelReadComplete() that may do nothing if nextChannelReadInvoked
     // is false. This is prefered to introduce another volatile flag because often fireChannelRead(...) and
     // fireChannelReadComplete() are triggered from the EventExecutor thread anyway.
-    private boolean channelReadCompletePending;
+    private boolean nextChannelReadInvoked;
+    private boolean readInvoked;
 
     // Will be set to null if no child executor should be used, otherwise it will be set to the
     // child executor.
@@ -317,7 +318,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap impleme
     }
 
     private void invokeNextChannelRead(AbstractChannelHandlerContext next, Object msg) {
-        channelReadCompletePending = true;
+        nextChannelReadInvoked = true;
         next.invokeChannelRead(msg);
     }
 
@@ -351,16 +352,20 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap impleme
     }
 
     private void invokeNextChannelReadComplete(AbstractChannelHandlerContext next) {
-        if (channelReadCompletePending) {
-            channelReadCompletePending = false;
+        if (nextChannelReadInvoked) {
+            nextChannelReadInvoked = false;
+            readInvoked = false;
+
             next.invokeChannelReadComplete();
-        } else if (!channel().config().isAutoRead() && next != pipeline.tail) {
+        } else if (readInvoked && !channel().config().isAutoRead()) {
             // As this context not belongs to the last handler in the pipeline and autoRead is false we need to
             // trigger read again as otherwise we may stop reading before a full message was passed on to the
             // pipeline. This is especially true for all kind of decoders that usually buffer bytes/messages until
             // they are able to compose a full message that is passed via fireChannelRead(...) and so be consumed
             // be the rest of the handlers in the pipeline.
             read();
+        } else {
+            readInvoked = false;
         }
     }
 
@@ -625,6 +630,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap impleme
 
     private void invokeRead() {
         try {
+            readInvoked = true;
             ((ChannelOutboundHandler) handler()).read(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
